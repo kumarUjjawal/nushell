@@ -23,6 +23,12 @@ impl Command for Select {
                 "ignore missing data (make all cell path members optional)",
                 Some('i'),
             )
+            .named(
+                "skip",
+                SyntaxShape::Int,
+                "skip the first N rows or elements before selecting",
+                None,
+            )
             .rest(
                 "rest",
                 SyntaxShape::CellPath,
@@ -53,8 +59,36 @@ produce a table, a list will produce a list, and a record will produce a record.
         call: &Call,
         input: PipelineData,
     ) -> Result<PipelineData, ShellError> {
+        let skip_opt: Option<i64> = call.get_flag(engine_state, stack, "skip")?;
+
+        let skip: usize = match skip_opt {
+            Some(n) if n >= 0 => n as usize,
+            Some(n) => {
+                return Err(ShellError::UnsupportedInput {
+                    msg: format!("skip must be non‑negative, got {}", n),
+                    input: "".to_string(),
+                    msg_span: call.head,
+                    input_span: call.head,
+                });
+            }
+            None => 0,
+        };
+
+        // Apply skipping if necessary
+        let input = if skip > 0 {
+            let skipped = input.into_iter().skip(skip).collect::<Vec<_>>();
+            PipelineData::Value(
+                Value::List {
+                    vals: skipped,
+                    internal_span: call.head,
+                },
+                None,
+            )
+        } else {
+            input
+        };
         let columns: Vec<Value> = call.rest(engine_state, stack, 0)?;
-        let mut new_columns: Vec<CellPath> = vec![];
+        let mut new_columns: Vec<CellPath> = Vec::new();
         for col_val in columns {
             let col_span = col_val.span();
             match col_val {
@@ -100,16 +134,14 @@ produce a table, a list will produce a list, and a record will produce a record.
                 }
             }
         }
-        let ignore_errors = call.has_flag(engine_state, stack, "ignore-errors")?;
-        let span = call.head;
 
-        if ignore_errors {
-            for cell_path in &mut new_columns {
-                cell_path.make_optional();
+        if call.has_flag(engine_state, stack, "ignore-errors")? {
+            for cp in &mut new_columns {
+                cp.make_optional();
             }
         }
 
-        select(engine_state, span, new_columns, input)
+        select(engine_state, call.head, new_columns, input)
     }
 
     fn examples(&self) -> Vec<Example> {
@@ -165,6 +197,13 @@ produce a table, a list will produce a list, and a record will produce a record.
                         "type" => Value::test_string("toml")
                     }),
                 ])),
+            },
+            Example {
+                description: "Skip the first two rows before selecting a column",
+                example: "[[name age]; [Alice 30] [Bob 25] [Carol 28]] | select --skip 2 name",
+                result: Some(Value::test_list(vec![Value::test_record(record! {
+                    "name" => Value::test_string("Carol")
+                })])),
             },
         ]
     }
